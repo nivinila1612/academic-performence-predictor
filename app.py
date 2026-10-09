@@ -23,12 +23,14 @@ def load_models():
     rf = joblib.load("random_forest.pkl")
     return lr, rf
 
+
 try:
     lr, rf = load_models()
 except Exception as e:
     st.error("Model files could not be loaded.")
     st.error(str(e))
     st.stop()
+
 
 # -----------------------------
 # Title
@@ -41,6 +43,7 @@ st.write(
 )
 
 st.divider()
+
 
 # -----------------------------
 # Input Section
@@ -77,6 +80,7 @@ previous_gpa = st.number_input(
 
 st.divider()
 
+
 # -----------------------------
 # Feature Names
 # -----------------------------
@@ -86,6 +90,7 @@ feature_names = [
     "Assignment",
     "Previous GPA"
 ]
+
 
 # -----------------------------
 # Prediction
@@ -98,12 +103,13 @@ if st.button("🔍 Predict Performance", use_container_width=True):
     assignment_scaled = (assignment / 5) * 100
     previous_gpa_scaled = (previous_gpa / 10) * 100
 
+    # Model input
     X_new = np.array([[
         internal_1_scaled,
         internal_2_scaled,
         assignment_scaled,
         previous_gpa_scaled
-    ]])
+    ]], dtype=float)
 
     # -----------------------------
     # Hybrid Prediction
@@ -116,7 +122,7 @@ if st.button("🔍 Predict Performance", use_container_width=True):
 
     except Exception as e:
         st.error("Prediction failed.")
-        st.error(str(e))
+        st.exception(e)
         st.stop()
 
     # -----------------------------
@@ -131,6 +137,9 @@ if st.button("🔍 Predict Performance", use_container_width=True):
     else:
         result = "At Risk"
 
+    # -----------------------------
+    # Display Result
+    # -----------------------------
     st.divider()
     st.subheader("Your Result")
 
@@ -155,19 +164,43 @@ if st.button("🔍 Predict Performance", use_container_width=True):
     )
 
     try:
-        # Use the same two models as the hybrid prediction
+        # Explain the same hybrid model used for prediction
         def hybrid_predict(X):
             X = np.asarray(X, dtype=float)
+
             pred_lr_values = lr.predict(X)
             pred_rf_values = rf.predict(X)
+
             return (pred_lr_values + pred_rf_values) / 2
 
-        # A representative background dataset is required.
-        # Create shap_background.csv from training data.
+        # Load SHAP background dataset
         background_df = pd.read_csv("shap_background.csv")
 
-        # Ensure the columns match the model input order.
-        background_df = background_df[feature_names]
+        # Fix column-name mismatch
+        background_df = background_df.rename(columns={
+            "Internal_1": "Internal 1",
+            "Internal_2": "Internal 2",
+            "Assignment": "Assignment",
+            "Previous_GPA": "Previous GPA"
+        })
+
+        # Check required columns
+        missing_features = [
+            name for name in feature_names
+            if name not in background_df.columns
+        ]
+
+        if missing_features:
+            st.error(
+                "SHAP background CSV is missing these columns: "
+                + ", ".join(missing_features)
+            )
+            st.stop()
+
+        # Select correct feature order and convert to numbers
+        background_df = background_df[feature_names].apply(
+            pd.to_numeric, errors="coerce"
+        ).dropna()
 
         background = background_df.to_numpy(dtype=float)
 
@@ -175,7 +208,15 @@ if st.button("🔍 Predict Performance", use_container_width=True):
             st.error("SHAP background dataset is empty.")
             st.stop()
 
-        # KernelExplainer explains the combined hybrid prediction.
+        # Limit background rows to improve performance
+        if len(background) > 25:
+            background = shap.sample(
+                background,
+                25,
+                random_state=42
+            )
+
+        # Explain hybrid prediction using KernelExplainer
         explainer = shap.KernelExplainer(
             hybrid_predict,
             background
@@ -186,6 +227,7 @@ if st.button("🔍 Predict Performance", use_container_width=True):
             nsamples=100
         )
 
+        # Handle different SHAP output shapes
         contributions = np.asarray(shap_values).reshape(-1)
 
         if len(contributions) != len(feature_names):
@@ -194,6 +236,15 @@ if st.button("🔍 Predict Performance", use_container_width=True):
             )
             st.stop()
 
+        # Baseline prediction for the background dataset
+        baseline = float(
+            np.asarray(hybrid_predict(background)).mean()
+        )
+
+        st.write(f"**Baseline prediction:** {baseline:.2f}")
+        st.write(f"**Hybrid prediction:** {prediction:.2f}")
+
+        # Sort features by contribution magnitude
         explanation = sorted(
             zip(feature_names, contributions),
             key=lambda item: abs(item[1]),
@@ -205,31 +256,49 @@ if st.button("🔍 Predict Performance", use_container_width=True):
         for feature, contribution in explanation:
             if contribution > 0:
                 st.write(
-                    f"🟢 **{feature}**: pushes the numerical "
-                    "prediction higher than the baseline."
+                    f"🟢 **{feature}: +{contribution:.2f}** — "
+                    "pushes the numerical prediction higher."
                 )
             elif contribution < 0:
                 st.write(
-                    f"🔴 **{feature}**: pushes the numerical "
-                    "prediction lower than the baseline."
+                    f"🔴 **{feature}: {contribution:.2f}** — "
+                    "pushes the numerical prediction lower."
                 )
             else:
                 st.write(
-                    f"⚪ **{feature}**: no measurable contribution."
+                    f"⚪ **{feature}: 0.00** — "
+                    "no measurable contribution."
                 )
+
+        # SHAP contribution chart
+        chart_df = pd.DataFrame(
+            explanation,
+            columns=["Feature", "SHAP Value"]
+        )
+
+        st.write("**SHAP contribution chart**")
+
+        st.bar_chart(
+            chart_df.set_index("Feature")["SHAP Value"]
+        )
 
         st.caption(
             "SHAP values explain the hybrid numerical prediction "
             "relative to the selected background dataset. "
-            "They do not directly explain the category label."
+            "Positive values push the prediction higher; negative "
+            "values push it lower. They do not directly explain "
+            "the category label."
         )
 
     except FileNotFoundError:
         st.warning(
             "SHAP explanation needs shap_background.csv. "
-            "Create this file from representative training data "
-            "using the same four features and scaling as the models."
+            "Upload this file to the same GitHub repository "
+            "as app.py."
         )
+
     except Exception as e:
-        st.warning("The prediction was generated, but SHAP failed.")
+        st.warning(
+            "The prediction was generated, but SHAP failed."
+        )
         st.exception(e)
